@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rm/
+[Aa]rm64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+
+# Build outputs
+*.dll
+*.exe
+*.pdb
+*.lib
+*.exp
+*.obj
+*.iobj
+*.ipdb
+*.ilk
+
+# Generated files (by generate.py)
+proxy.asm
+proxy_map.h
+exports.def
+
+# Visual Studio cache/options
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build logs
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.ipch
+*.VC.db
+*.VC.opendb
+
+# CMake
+CMakeSettings.json
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles/
+
+# Test files
+Test Files/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# Documentation (generated)
+ai_studio_code.md
