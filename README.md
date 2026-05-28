@@ -1,130 +1,137 @@
-# DLL Proxy + Process Injection Framework
+# .NET AppDomainManager Config Hijack Framework
 
-Windows 白加黑 DLL 代理框架，集成 Early Bird APC 注入 + PPID 欺骗。配合 [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 快速获取目标 DLL 导出模板，一键生成可编译的注入工程。
+.NET 白加黑框架，利用 AppDomainManager 注入实现 CLR 级代码执行。配合 [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 快速发现可劫持的 .NET 目标，一键生成武器化套件。
 
 ## 功能特性
 
-- **OS-Level Export Forwarding** — 使用 `.def` 文件系统级转发，无需 ASM trampoline
-- **Early Bird APC Injection** — 在 EDR hook 初始化前执行 payload (T1055.004)
-- **PPID Spoofing** — 伪造父进程为 explorer.exe，打断进程树溯源 (T1134.004)
-- **异步 DllMain** — 后台线程执行注入，避免 Loader Lock 死锁
-- **环境检测** — 自动识别分析工具（x64dbg/Wireshark/IDA 等），发现则静默退出
+- **AppDomainManager 注入** — CLR 在 Main() 之前加载 payload，绕过强签名限制
+- **进程内 Shellcode 执行** — VirtualAlloc + CreateThread，无需远程注入
+- **环境检测** — 自动识别分析工具（dnSpy/ILSpy/x64dbg/Wireshark 等），发现则静默退出
 - **内存权限翻转** — 执行后 RWX → RX，降低内存扫描器检出率
+- **Config 保留** — 自动保留原始 assemblyBinding，确保宿主程序正常运行
+- **命名伪装** — namespace/class 伪装为系统组件名称
+
+## 原理
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  .NET AppDomainManager 注入流程                              │
+│                                                             │
+│  1. 用户运行 Target.exe                                      │
+│  2. CLR 读取 Target.exe.config                              │
+│  3. CLR 发现 <appDomainManagerAssembly> 配置                 │
+│  4. CLR 加载指定的 payload DLL (无需签名)                     │
+│  5. CLR 实例化 AssemblyManager 类                            │
+│  6. CLR 调用 InitializeNewDomain() ← payload 在此执行        │
+│  7. 宿主程序 Main() 正常启动                                  │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## 快速开始
 
 ### 前置条件
 
-- Windows 10/11 x64
-- Visual Studio 2022 (v143 工具集, C++ 桌面开发)
+- Windows 10/11
+- .NET Framework 4.x (csc.exe 编译器)
 - Python 3.7+
-- **推荐**: [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 用于快速提取目标 DLL 导出表
+- **推荐**: [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 用于发现 .NET 劫持目标
 
 ### 工作流程
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ 1. 使用 ZeroEye 提取目标 DLL 导出函数模板                      │
-│    ZeroEye.exe -d target.dll                                │
-│    → 生成 target_exports.cpp (或 target_pragma.cpp)          │
+│ 1. 使用 ZeroEye 发现可劫持的 .NET 目标                        │
+│    ZeroEye.exe -p c:\ -t dotnet                             │
+│    → 输出可劫持的 .NET 程序列表                               │
 │                                                             │
-│ 2. 使用 generate.py 生成编译套件                              │
-│    python generate.py -u target_exports.cpp -n target       │
-│    → 生成 exports.def + dllmain.cpp                         │
+│ 2. 使用 generate_dotnet.py 生成劫持套件                       │
+│    python generate_dotnet.py -t Target.exe                  │
+│    → 生成 Target.exe.config + payload.cs                    │
 │                                                             │
-│ 3. 在 dllmain.cpp 中填入 SGN 编码后的 shellcode               │
-│    unsigned char payload[] = "\xfc\x48\x83...";             │
+│ 3. 在 payload.cs 中填入 SGN 编码后的 shellcode               │
+│    private static byte[] buf = new byte[] {0xfc,0x48,...};  │
 │                                                             │
-│ 4. Visual Studio 编译 (Release x64)                         │
-│    → 输出 x64/Release/dll_hook1.dll                         │
+│ 4. 编译 payload DLL                                         │
+│    csc /target:library /out:Microsoft.Configuration.        │
+│        Helper.dll payload.cs                                │
 │                                                             │
 │ 5. 部署                                                     │
-│    dll_hook1.dll → 重命名为 target.dll (黑文件)              │
-│    原始 target.dll → 重命名为 target_orig.dll (白文件)        │
-│    两个文件放在目标程序同目录                                  │
+│    Target.exe.config → 放到目标程序同目录                     │
+│    payload.dll → 放到目标程序同目录                           │
+│    运行 Target.exe → shellcode 在 Main() 之前执行            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### 命令行用法
 
 ```bash
-# 使用 ZeroEye 生成的 _exports.cpp 模板
-python generate.py -u libcurl_exports.cpp -n libcurl
+# 基本用法 — 指定目标 .NET 程序名
+python generate_dotnet.py -t MyApp.exe
 
-# 使用 ZeroEye 生成的 _pragma.cpp (C++ 修饰名 DLL)
-python generate.py -u target_pragma.cpp -n target
+# 保留原始 config 的 assemblyBinding (推荐)
+python generate_dotnet.py -t MyApp.exe -c MyApp.exe.config
 
-# 使用 dumpbin 输出
-dumpbin /exports target.dll > exports.txt
-python generate.py -u exports.txt -n target
+# 自定义 payload DLL 名称
+python generate_dotnet.py -t MyApp.exe -o CustomName
 
 # 交互模式
-python generate.py
+python generate_dotnet.py
 ```
-
-### 支持的输入格式
-
-| 格式 | 来源 | 说明 |
-|------|------|------|
-| extern C | ZeroEye `-d` 生成的 `_exports.cpp` | 纯 C 导出 DLL (推荐) |
-| pragma | ZeroEye `-d` 生成的 `_pragma.cpp` | C++ 修饰名 DLL |
-| dumpbin | `dumpbin /exports target.dll` | Visual Studio 自带工具 |
-| 简单列表 | 每行一个函数名 | 手动编写 |
-
-脚本会自动检测输入格式，无需手动指定。
 
 ## 推荐搭配: ZeroEye 5.0
 
-[ZeroEye](https://github.com/ImCoriander/ZeroEye) 是一款自动化白加黑扫描工具，可以：
+[ZeroEye](https://github.com/ImCoriander/ZeroEye) 5.0 新增 .NET 程序扫描支持：
 
-- **扫描目录** 自动发现可劫持的 DLL (`-p` 参数)
-- **生成代理模板** 一键提取目标 DLL 的所有导出函数 (`-d` 参数)
-- **支持 C++ DLL** 自动处理 MSVC 修饰名，生成 pragma 转发模板
-- **支持 .NET** 自动生成 AppDomainManager 注入 config
+- **自动识别 .NET** 通过 PE CLR header 检测，无需手动判断
+- **Config 劫持检测** 检测 .exe.config 是否存在（不存在 = 可创建）
+- **P/Invoke 分析** 提取 ModuleRef 表，发现额外的 DLL 劫持向量
+- **AssemblyRef 分析** 识别可侧加载的第三方程序集
 
 典型用法:
 ```bash
-# 扫描 C 盘寻找可劫持目标
-ZeroEye.exe -p c:\ -s -x 64
+# 扫描目录寻找可劫持的 .NET 目标
+ZeroEye.exe -p c:\ -t dotnet -s -x 64
 
-# 对目标 DLL 生成代理模板
-ZeroEye.exe -d libcurl.dll
-# → 生成 libcurl_exports.cpp, libcurl_pragma.cpp, libcurl_class.cpp
+# 分析单个 .NET 程序
+ZeroEye.exe -i Target.exe
 
-# 将模板喂给本项目
-python generate.py -u libcurl_exports.cpp -n libcurl
+# 生成劫持模板 (ZeroEye 的 PoC 版本)
+ZeroEye.exe -d Target.exe
+
+# 使用本项目生成武器化版本
+python generate_dotnet.py -t Target.exe -c Target.exe.config
 ```
 
 ## 项目结构
 
 ```
-dll_sgn/
-├── generate.py          # 代理 DLL 生成器 (多格式输入)
-├── dllmain.cpp          # 注入 payload 实现 (生成产物)
-├── exports.def          # 导出转发定义 (生成产物)
-├── dll_hook1.sln        # Visual Studio 解决方案
-├── dll_hook1.vcxproj    # 工程配置 (Release x64, /MT)
-├── framework.h          # Windows 框架头
-└── pch.h                # 预编译头
+dll_sgn/ (dotnet branch)
+├── generate_dotnet.py   # .NET 劫持套件生成器
+├── payload.cs           # 生成产物: 武器化 C# payload
+├── Target.exe.config    # 生成产物: AppDomainManager 注入 config
+└── README.md            # 本文件
 ```
 
 ## 编译配置
 
-- **Configuration**: Release
-- **Platform**: x64
-- **Runtime Library**: /MT (静态链接，无 vcruntime 依赖)
-- **Character Set**: MultiByte
-- **Module Definition**: exports.def
+```bash
+# 标准编译
+csc /target:library /out:Microsoft.Configuration.Helper.dll payload.cs
+
+# 如需引用其他程序集
+csc /target:library /out:Microsoft.Configuration.Helper.dll /reference:System.dll payload.cs
+```
 
 ## 注意事项
 
-- Payload 必须经过编码 (推荐 SGN)，否则静态特征明显
-- `conhost.exe` 作为注入目标进程，可在 `dllmain.cpp` 中修改
-- 环境检测的进程黑名单可根据实际场景调整
+- Shellcode 必须经过编码 (推荐 SGN)，否则静态特征明显
+- 仅适用于 .NET Framework 4.x 程序（.NET Core/5+ 不支持 AppDomainManager）
+- 如果目标已有 .exe.config，使用 `-c` 参数保留原始 assemblyBinding
+- payload DLL 名称建议伪装为系统组件（默认: Microsoft.Configuration.Helper）
 - 仅用于授权渗透测试和 CTF 竞赛
 
 ## 相关技术
 
-- [T1574.001 - DLL Search Order Hijacking](https://attack.mitre.org/techniques/T1574/001/)
-- [T1055.004 - Process Injection: APC](https://attack.mitre.org/techniques/T1055/004/)
-- [T1134.004 - Parent PID Spoofing](https://attack.mitre.org/techniques/T1134/004/)
+- [T1574.001 - Hijack Execution Flow: DLL Search Order Hijacking](https://attack.mitre.org/techniques/T1574/001/)
+- [AppDomainManager Injection](https://www.rapid7.com/blog/post/2023/07/11/appdomain-manager-injection-new-techniques-for-red-teams/)
+- 原生 DLL 代理版本请切换到 `main` 分支
