@@ -1,293 +1,130 @@
-# DLL Hijacking & Process Injection Framework
+# DLL Proxy + Process Injection Framework
 
-A sophisticated DLL hijacking and process injection framework for Windows red team operations and CTF competitions. This toolkit automates the creation of proxy DLLs with advanced evasion techniques.
+Windows 白加黑 DLL 代理框架，集成 Early Bird APC 注入 + PPID 欺骗。配合 [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 快速获取目标 DLL 导出模板，一键生成可编译的注入工程。
 
-## Features
+## 功能特性
 
-### Core Capabilities
-- **OS-Level Export Forwarding**: Uses Windows native DLL forwarding mechanism instead of manual ASM trampolines
-- **Early Bird APC Injection**: Executes payload before EDR hooks are fully initialized
-- **PPID Spoofing**: Breaks process tree lineage by spoofing parent process (explorer.exe/svchost.exe)
-- **Asynchronous DllMain**: Prevents loader lock and ensures host process stability
-- **Environment Detection**: Identifies analysis tools and server environments before execution
-- **Memory Protection Flipping**: RWX → RX transition to evade memory scanners
+- **OS-Level Export Forwarding** — 使用 `.def` 文件系统级转发，无需 ASM trampoline
+- **Early Bird APC Injection** — 在 EDR hook 初始化前执行 payload (T1055.004)
+- **PPID Spoofing** — 伪造父进程为 explorer.exe，打断进程树溯源 (T1134.004)
+- **异步 DllMain** — 后台线程执行注入，避免 Loader Lock 死锁
+- **环境检测** — 自动识别分析工具（x64dbg/Wireshark/IDA 等），发现则静默退出
+- **内存权限翻转** — 执行后 RWX → RX，降低内存扫描器检出率
 
-### OPSEC Features
-- Hidden process creation (CREATE_NO_WINDOW)
-- Automatic cleanup of resources
-- Anti-analysis tool detection (debuggers, Wireshark, Process Hacker, etc.)
-- Server environment profiling
-- Minimal footprint with system-level forwarding
+## 快速开始
 
-## Architecture
+### 前置条件
 
-### Components
-
-1. **generate.py**: Automated proxy DLL generator
-   - Parses exported functions from target DLL
-   - Generates OS-level forwarding definitions
-   - Creates injection payload wrapper
-
-2. **dllmain.cpp**: Injection payload implementation
-   - Background thread execution (prevents loader lock)
-   - PPID spoofing via STARTUPINFOEX
-   - Early Bird APC injection technique
-   - Environment safety checks
-
-## Installation
-
-### Prerequisites
-- Windows 10/11 (x64)
-- Visual Studio 2019/2022 with C++ Desktop Development workload
+- Windows 10/11 x64
+- Visual Studio 2022 (v143 工具集, C++ 桌面开发)
 - Python 3.7+
-- Git for Windows
+- **推荐**: [ZeroEye 5.0](https://github.com/ImCoriander/ZeroEye) 用于快速提取目标 DLL 导出表
 
-### Build Instructions
+### 工作流程
 
-1. **Clone the repository**
-```bash
-git clone https://github.com/yourusername/dll_hook1.git
-cd dll_hook1
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. 使用 ZeroEye 提取目标 DLL 导出函数模板                      │
+│    ZeroEye.exe -d target.dll                                │
+│    → 生成 target_exports.cpp (或 target_pragma.cpp)          │
+│                                                             │
+│ 2. 使用 generate.py 生成编译套件                              │
+│    python generate.py -u target_exports.cpp -n target       │
+│    → 生成 exports.def + dllmain.cpp                         │
+│                                                             │
+│ 3. 在 dllmain.cpp 中填入 SGN 编码后的 shellcode               │
+│    unsigned char payload[] = "\xfc\x48\x83...";             │
+│                                                             │
+│ 4. Visual Studio 编译 (Release x64)                         │
+│    → 输出 x64/Release/dll_hook1.dll                         │
+│                                                             │
+│ 5. 部署                                                     │
+│    dll_hook1.dll → 重命名为 target.dll (黑文件)              │
+│    原始 target.dll → 重命名为 target_orig.dll (白文件)        │
+│    两个文件放在目标程序同目录                                  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-2. **Generate proxy files**
+### 命令行用法
+
 ```bash
-# Interactive mode
+# 使用 ZeroEye 生成的 _exports.cpp 模板
+python generate.py -u libcurl_exports.cpp -n libcurl
+
+# 使用 ZeroEye 生成的 _pragma.cpp (C++ 修饰名 DLL)
+python generate.py -u target_pragma.cpp -n target
+
+# 使用 dumpbin 输出
+dumpbin /exports target.dll > exports.txt
+python generate.py -u exports.txt -n target
+
+# 交互模式
 python generate.py
-
-# Command-line mode
-python generate.py -u funcs.txt -n target_dll_name
 ```
 
-3. **Configure payload**
-   - Edit `dllmain.cpp` and replace the `payload[]` array with your encoded shellcode
-   - Ensure payload is SGN-encoded or similar
+### 支持的输入格式
 
-4. **Build with Visual Studio**
-   - Open `dll_hook1.sln` in Visual Studio
-   - Select **Release** configuration and **x64** platform
-   - Build Solution (Ctrl+Shift+B)
-   - Output: `x64\Release\dll_hook1.dll`
+| 格式 | 来源 | 说明 |
+|------|------|------|
+| extern C | ZeroEye `-d` 生成的 `_exports.cpp` | 纯 C 导出 DLL (推荐) |
+| pragma | ZeroEye `-d` 生成的 `_pragma.cpp` | C++ 修饰名 DLL |
+| dumpbin | `dumpbin /exports target.dll` | Visual Studio 自带工具 |
+| 简单列表 | 每行一个函数名 | 手动编写 |
 
-5. **Deploy**
-   - Rename compiled DLL to match target DLL name (e.g., `version.dll`)
-   - Rename original DLL to `[name]_orig.dll` (e.g., `version_orig.dll`)
-   - Place both DLLs in the target application directory
+脚本会自动检测输入格式，无需手动指定。
 
-## Usage
+## 推荐搭配: ZeroEye 5.0
 
-### Basic Workflow
+[ZeroEye](https://github.com/ImCoriander/ZeroEye) 是一款自动化白加黑扫描工具，可以：
 
+- **扫描目录** 自动发现可劫持的 DLL (`-p` 参数)
+- **生成代理模板** 一键提取目标 DLL 的所有导出函数 (`-d` 参数)
+- **支持 C++ DLL** 自动处理 MSVC 修饰名，生成 pragma 转发模板
+- **支持 .NET** 自动生成 AppDomainManager 注入 config
+
+典型用法:
 ```bash
-# Step 1: Extract exported functions from target DLL
-# Use tools like: dumpbin /exports target.dll > funcs.txt
-# Or: CFF Explorer, PE-bear, etc.
+# 扫描 C 盘寻找可劫持目标
+ZeroEye.exe -p c:\ -s -x 64
 
-# Step 2: Generate proxy files
-python generate.py -u funcs.txt -n version
+# 对目标 DLL 生成代理模板
+ZeroEye.exe -d libcurl.dll
+# → 生成 libcurl_exports.cpp, libcurl_pragma.cpp, libcurl_class.cpp
 
-# Step 3: Insert your payload into dllmain.cpp
-# Replace the payload[] array with your shellcode
-
-# Step 4: Build the project in Visual Studio (Release x64)
-
-# Step 5: Deploy
-# - Compiled DLL → version.dll
-# - Original DLL → version_orig.dll
+# 将模板喂给本项目
+python generate.py -u libcurl_exports.cpp -n libcurl
 ```
 
-### Example: Hijacking version.dll
-
-```bash
-# Generate proxy for version.dll
-python generate.py -u version_exports.txt -n version
-
-# Build in Visual Studio
-# Deploy:
-#   your_compiled.dll → version.dll
-#   original_system.dll → version_orig.dll
-```
-
-## Technical Details
-
-### OS-Level Export Forwarding
-
-Instead of generating ASM trampolines, the framework uses Windows native forwarding:
-
-```def
-LIBRARY "target"
-EXPORTS
-    FunctionName=target_orig.FunctionName
-```
-
-This approach:
-- Reduces code complexity
-- Eliminates ASM maintenance
-- Improves compatibility
-- Decreases detection surface
-
-### Early Bird APC Injection
-
-The injection sequence:
-
-1. **PPID Spoofing**: Acquire handle to explorer.exe/svchost.exe
-2. **Process Creation**: Launch conhost.exe in suspended state with spoofed parent
-3. **Memory Allocation**: Allocate RWX memory in target process
-4. **Payload Writing**: Write encoded shellcode to allocated memory
-5. **APC Queuing**: Queue APC to main thread pointing to payload
-6. **Thread Resumption**: Resume thread, triggering APC execution
-7. **Protection Flip**: Change memory to RX after execution
-
-### Asynchronous Execution
-
-```cpp
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hModule);
-        
-        // Non-blocking: spawn background thread and return immediately
-        HANDLE hThread = CreateThread(NULL, 0, BackgroundInjectionThread, NULL, 0, NULL);
-        if (hThread) CloseHandle(hThread);
-    }
-    return TRUE;
-}
-```
-
-## Configuration
-
-### Environment Detection
-
-Edit the process lists in `dllmain.cpp`:
-
-```cpp
-// Server processes (whitelist)
-const char* serverProcs[] = {
-    "java.exe", "javaw.exe", "w3wp.exe", "httpd.exe", "nginx.exe",
-    "mysqld.exe", "sqlservr.exe", "php-cgi.exe", "node.exe", "BtSoft.exe"
-};
-
-// Analysis tools (blacklist)
-const char* analystProcs[] = {
-    "x64dbg.exe", "x32dbg.exe", "Wireshark.exe", "ProcessHacker.exe",
-    "Procmon.exe", "ida64.exe", "ollydbg.exe"
-};
-```
-
-### Injection Target
-
-Change the target process in `ExecuteEarlyBirdInjection()`:
-
-```cpp
-// Default: conhost.exe
-if (GetSystemDirectoryA(targetPath, MAX_PATH)) {
-    strcat_s(targetPath, "\\conhost.exe");
-}
-
-// Alternative: notepad.exe, svchost.exe, etc.
-```
-
-## Project Structure
+## 项目结构
 
 ```
-dll_hook1/
-├── generate.py              # Proxy generator script
-├── dllmain.cpp             # Injection payload implementation
-├── exports.def             # Generated export definitions
-├── dll_hook1.vcxproj       # Visual Studio project file
-├── dll_hook1.sln           # Visual Studio solution
-├── framework.h             # Windows framework headers
-├── pch.h                   # Precompiled header
-└── README.md               # This file
+dll_sgn/
+├── generate.py          # 代理 DLL 生成器 (多格式输入)
+├── dllmain.cpp          # 注入 payload 实现 (生成产物)
+├── exports.def          # 导出转发定义 (生成产物)
+├── dll_hook1.sln        # Visual Studio 解决方案
+├── dll_hook1.vcxproj    # 工程配置 (Release x64, /MT)
+├── framework.h          # Windows 框架头
+└── pch.h                # 预编译头
 ```
 
-## Security Considerations
+## 编译配置
 
-### Legal Use Only
-This framework is designed for:
-- Authorized penetration testing
-- CTF competitions
-- Security research
-- Educational purposes
+- **Configuration**: Release
+- **Platform**: x64
+- **Runtime Library**: /MT (静态链接，无 vcruntime 依赖)
+- **Character Set**: MultiByte
+- **Module Definition**: exports.def
 
-**DO NOT** use this tool for:
-- Unauthorized access to systems
-- Malicious activities
-- Distribution of malware
+## 注意事项
 
-### Detection Vectors
+- Payload 必须经过编码 (推荐 SGN)，否则静态特征明显
+- `conhost.exe` 作为注入目标进程，可在 `dllmain.cpp` 中修改
+- 环境检测的进程黑名单可根据实际场景调整
+- 仅用于授权渗透测试和 CTF 竞赛
 
-While this framework implements multiple evasion techniques, be aware of:
-- Behavioral analysis (process creation patterns)
-- Memory scanning (RWX allocations)
-- Parent-child process anomalies
-- DLL load order monitoring
-- Signature-based detection of known shellcode
+## 相关技术
 
-## Troubleshooting
-
-### Build Errors
-
-**Error: LNK1106 - Invalid or corrupt file**
-- Ensure you're building for x64 platform
-- Clean solution and rebuild
-- Check that `exports.def` is properly formatted
-
-**Error: Cannot find original DLL**
-- Verify `[name]_orig.dll` exists in the same directory
-- Check file permissions
-- Ensure DLL name matches exactly (case-sensitive)
-
-### Runtime Issues
-
-**Host application crashes on startup**
-- Verify all exported functions are correctly forwarded
-- Check that original DLL is not corrupted
-- Ensure architecture matches (x64 vs x86)
-
-**Payload doesn't execute**
-- Check environment detection logic
-- Verify payload is properly encoded
-- Ensure target process has sufficient privileges
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-## Changelog
-
-### v2.0.0 (Current)
-- Implemented OS-level export forwarding
-- Added Early Bird APC injection
-- Implemented PPID spoofing
-- Asynchronous DllMain execution
-- Removed ASM trampoline dependency
-
-### v1.0.0
-- Initial release
-- Basic proxy generation
-- CreateRemoteThread injection
-- Manual ASM trampolines
-
-## License
-
-This project is provided for educational and authorized security testing purposes only. Users are responsible for compliance with applicable laws and regulations.
-
-## References
-
-- [DLL Hijacking Techniques](https://attack.mitre.org/techniques/T1574/001/)
-- [Process Injection: Early Bird](https://attack.mitre.org/techniques/T1055/)
-- [Parent PID Spoofing](https://attack.mitre.org/techniques/T1134/004/)
-- [Windows DLL Export Forwarding](https://docs.microsoft.com/en-us/cpp/build/exporting-from-a-dll)
-
-## Contact
-
-For questions, issues, or security concerns, please open an issue on GitHub.
-
----
-
-**⚠️ WARNING**: This tool is intended for authorized security testing only. Misuse may violate laws including the Computer Fraud and Abuse Act (CFAA) and similar legislation in other jurisdictions.
+- [T1574.001 - DLL Search Order Hijacking](https://attack.mitre.org/techniques/T1574/001/)
+- [T1055.004 - Process Injection: APC](https://attack.mitre.org/techniques/T1055/004/)
+- [T1134.004 - Parent PID Spoofing](https://attack.mitre.org/techniques/T1134/004/)

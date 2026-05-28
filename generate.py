@@ -3,6 +3,54 @@ import sys
 import os
 import argparse
 
+# ==========================================================
+# 多格式输入解析
+# ==========================================================
+
+def detect_and_parse(content):
+    """
+    自动检测输入文件格式并提取导出函数名列表。
+    返回 (func_names, is_decorated) 元组。
+    is_decorated=True 表示函数名是 C++ 修饰名，需要原样转发。
+    """
+    # 格式1: ZeroEye _pragma.cpp — #pragma comment(linker, "/export:NAME=ORIG.NAME")
+    pragma_pattern = re.compile(
+        r'#pragma\s+comment\s*\(\s*linker\s*,\s*"/export:([^=]+)='
+    )
+    pragma_names = pragma_pattern.findall(content)
+    if pragma_names:
+        names = [n.strip() for n in pragma_names if n.strip()]
+        print(f"[*] 检测到 pragma 格式，提取 {len(names)} 个 decorated name")
+        return names, True
+
+    # 格式2: ZeroEye _exports.cpp — extern "C" __declspec(dllexport) ... funcname(
+    extern_pattern = re.compile(r'extern\s+"C"\s+__declspec\(dllexport\).*?\s+(\w+)\s*\(')
+    extern_names = extern_pattern.findall(content)
+    if extern_names:
+        print(f"[*] 检测到 extern C 格式，提取 {len(extern_names)} 个函数名")
+        return extern_names, False
+
+    # 格式3: dumpbin /exports 输出
+    # 典型行:  "    1    0 00012AB0 curl_easy_init" 或 "    1    0 00012AB0 ?Method@Class@@..."
+    dumpbin_pattern = re.compile(r'^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)', re.MULTILINE)
+    dumpbin_names = dumpbin_pattern.findall(content)
+    if dumpbin_names and len(dumpbin_names) >= 3:
+        # 判断是否含 decorated name
+        has_decorated = any('?' in n or '@' in n for n in dumpbin_names)
+        print(f"[*] 检测到 dumpbin 格式，提取 {len(dumpbin_names)} 个函数名")
+        return dumpbin_names, has_decorated
+
+    # 格式4: 简单列表 — 每行一个函数名
+    lines = [l.strip() for l in content.splitlines() if l.strip() and not l.strip().startswith('#') and not l.strip().startswith('//')]
+    if lines:
+        # 判断是否含 decorated name
+        has_decorated = any('?' in n or '@' in n for n in lines)
+        print(f"[*] 检测到简单列表格式，提取 {len(lines)} 个函数名")
+        return lines, has_decorated
+
+    return [], False
+
+
 def generate_dllmain_cpp():
     """
     生成重构后的 dllmain.cpp (Early Bird APC + PPID Spoofing + 异步化)
@@ -274,6 +322,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 def generate_files(input_file, dll_base_name):
     """
     核心生成逻辑 (OS-Level Export Forwarding)
+    支持多种输入格式: extern C / pragma / dumpbin / 简单列表
     """
     if not os.path.exists(input_file):
         print(f"\n[!] 错误: 找不到文件 '{input_file}'")
@@ -286,9 +335,8 @@ def generate_files(input_file, dll_base_name):
         print(f"\n[!] 读取文件失败: {e}")
         return False
 
-    # 正则提取函数名
-    pattern = re.compile(r'extern\s+"C"\s+__declspec\(dllexport\).*?\s+(\w+)\s*\(')
-    raw_func_names = pattern.findall(content)
+    # 自动检测格式并提取函数名
+    raw_func_names, is_decorated = detect_and_parse(content)
 
     if not raw_func_names:
         print("\n[!] 警告: 在文件中未找到符合格式的导出函数。")
@@ -300,14 +348,19 @@ def generate_files(input_file, dll_base_name):
         if name.startswith("__imp_") or name.startswith("_imp_"):
             print(f"[-] 自动过滤非法数据符号: {name}")
             continue
+        if name == "DllMain" or name == "_DllMainCRTStartup":
+            continue
         func_names.append(name)
+
+    if not func_names:
+        print("\n[!] 警告: 过滤后无有效导出函数。")
+        return False
 
     orig_dll_name_no_ext = f"{dll_base_name}_orig"
 
     # ===== 生成 exports.def (使用 OS-Level Forwarding) =====
     def_content = f'LIBRARY "{dll_base_name}"\nEXPORTS\n'
     for func in func_names:
-        # 格式: 导出函数名=原DLL模块名.导出函数名 (不带 .dll 后缀)
         def_content += f"    {func}={orig_dll_name_no_ext}.{func}\n"
 
     with open("exports.def", "w") as f:
@@ -317,12 +370,13 @@ def generate_files(input_file, dll_base_name):
     generate_dllmain_cpp()
 
     print(f"\n[+] 编译套件生成成功！")
-    print(f"    1. exports.def (OS-Level Forwarding)")
+    print(f"    1. exports.def (OS-Level Forwarding, {len(func_names)} 个导出)")
     print(f"    2. dllmain.cpp (Early Bird APC + PPID Spoofing + 异步化)")
+    if is_decorated:
+        print(f"\n[*] 注意: 输入含 C++ 修饰名，已使用 decorated name 转发")
     print(f"\n[!] 最终实战重命名指南:")
     print(f"    黑文件 (你编译的)  -> {dll_base_name}.dll")
     print(f"    白文件 (系统合法的)-> {orig_dll_name_no_ext}.dll")
-    print(f"\n[!] 注意: 不再生成 proxy.asm 和 proxy_map.h，使用系统级转发")
     return True
 
 def interactive_mode():

@@ -37,10 +37,11 @@ bld/
 *.ipdb
 *.ilk
 
-# Generated files (by generate.py)
-proxy.asm
-proxy_map.h
-exports.def
+# ZeroEye (reference only, not part of this project)
+ZeroEye/
+
+# Claude Code session data
+.claude/
 
 # Visual Studio cache/options
 .vs/
